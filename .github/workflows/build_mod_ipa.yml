@@ -20,7 +20,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.IPA_TOKEN }}
         run: |
-          gh release download ipa-v1 --repo xchao165-sketch/hoccungai-mod --pattern "$IPA_NAME" --dir .
+          gh release download ipa-v1 --repo xchao165-sketch/hoccungai-mod --dir .
+          IPA_FILE="$(find . -maxdepth 1 -name '*.ipa' | head -n 1)"
+          test -n "$IPA_FILE"
+          mv "$IPA_FILE" "$IPA_NAME"
           test -f "$IPA_NAME"
 
       - name: Build dylib
