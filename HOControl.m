@@ -513,7 +513,7 @@ static void HOHookAlerts(void) {
     panel.center = next;
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         CGRect base = CGRectMake((screen.width - 340) / 2, (screen.height - 455) / 2, 340, 455);
-        hoMenuOffset = CGPointMake(next.x - CGRectGetMidX(base), next.y - CGRectGetMidY(base));
+        hoMenuOffset = CGPointMake(next.x - (base.origin.x + base.size.width / 2), next.y - (base.origin.y + base.size.height / 2));
     }
 }
 
