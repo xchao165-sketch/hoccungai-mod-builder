@@ -44,8 +44,8 @@ static NSMutableSet<NSValue *> *hoHookedMethods;
 static UITapGestureRecognizer *hoGesture;
 static id hoGestureTarget;
 static UIWindow *hoMenuWindow;
-static CGPoint hoMenuOffset = CGPointZero;
-static CGPoint hoPanStartCenter = CGPointZero;
+static CGPoint hoMenuOffset = {0.0, 0.0};
+static CGPoint hoPanStartCenter = {0.0, 0.0};
 static NSTimeInterval hoLastTapTime = 0;
 
 static BOOL HOUnblocked(HOToggle toggle) {
