@@ -609,7 +609,7 @@ static void HOHookAlerts(void) {
     if (!url) {
         return;
     }
-    [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
         UIImage *image = [UIImage imageWithData:data];
         if (!image) {
             return;
@@ -620,7 +620,8 @@ static void HOHookAlerts(void) {
             button.imageView.contentMode = UIViewContentModeScaleAspectFill;
             button.imageView.clipsToBounds = YES;
         });
-    }] resume];
+    }];
+    [task resume];
 }
 
 + (UIButton *)floatingIcon {
