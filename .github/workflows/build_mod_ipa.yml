@@ -1,0 +1,71 @@
+name: Build Mod IPA Public
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-13
+    env:
+      IPA_NAME: Học_Cùng_AI_-_AISAVA_-_EDUKID_v2.3.5_Decrypted.ipa
+      HAS_SIGN: ${{ secrets.CERT_P12 != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Download private IPA
+        env:
+          GH_TOKEN: ${{ secrets.IPA_TOKEN }}
+        run: |
+          gh release download ipa-v1 --repo xchao165-sketch/hoccungai-mod --pattern "$IPA_NAME" --dir .
+          test -f "$IPA_NAME"
+
+      - name: Build dylib
+        run: |
+          chmod +x build_dylib.sh
+          ./build_dylib.sh
+          file HOControl.dylib
+
+      - name: Patch IPA
+        run: |
+          BASE="${IPA_NAME%.ipa}"
+          python3 patch_ipa.py "$IPA_NAME" HOControl.dylib "${BASE}_Mod.ipa"
+          test -f "${BASE}_Mod.ipa"
+
+      - name: Import signing material
+        if: env.HAS_SIGN == 'true'
+        run: |
+          echo "${{ secrets.CERT_P12 }}" | base64 --decode > cert.p12
+          echo "${{ secrets.PROVISION }}" | base64 --decode > profile.mobileprovision
+          security import cert.p12 -k ~/Library/Keychains/login.keychain-db -P "${{ secrets.CERT_PASSWORD }}" -T /usr/bin/codesign
+          security cms -D -i profile.mobileprovision > profile.plist
+          /usr/libexec/PlistBuddy -c "Print :Entitlements" -x profile.plist > entitlements.plist
+
+      - name: Sign MOD IPA
+        if: env.HAS_SIGN == 'true'
+        run: |
+          CERT="$(security find-identity -v -p codesigning | head -n 1 | sed 's/.*"\(.*\)".*/\1/')"
+          test -n "$CERT"
+          BASE="${IPA_NAME%.ipa}"
+          MOD_IPA="${BASE}_Mod.ipa"
+          SIGNED_IPA="${BASE}_Mod_Signed.ipa"
+          rm -rf signedbuild
+          unzip -q "$MOD_IPA" -d signedbuild
+          cp profile.mobileprovision signedbuild/Payload/Runner.app/embedded.mobileprovision
+          codesign -f -s "$CERT" --timestamp=none signedbuild/Payload/Runner.app/Frameworks/HOControl.dylib
+          codesign -f -s "$CERT" --entitlements entitlements.plist --timestamp=none --deep signedbuild/Payload/Runner.app
+          codesign -vvv --deep --strict signedbuild/Payload/Runner.app
+          ditto -c -k --keepParent signedbuild/Payload "$SIGNED_IPA"
+          test -f "$SIGNED_IPA"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-ipa
+          path: |
+            *_Mod.ipa
+            *_Mod_Signed.ipa
+          if-no-files-found: error
