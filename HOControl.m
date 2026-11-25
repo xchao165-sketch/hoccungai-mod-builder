@@ -10,6 +10,7 @@
 + (void)hide;
 + (void)installGesture;
 + (void)showLeaveWarning;
++ (void)handlePan:(UIPanGestureRecognizer *)gesture;
 + (UIViewController *)topViewController;
 + (void)change:(HOSwitch *)sender;
 + (void)allOn;
@@ -35,6 +36,7 @@ static IMP HOOrigRemoveScriptHandler;
 static IMP HOOrigEvaluateJS;
 static IMP HOOrigPresentVC;
 static NSMutableDictionary<NSString *, NSValue *> *hoPluginOriginals;
+static NSMutableDictionary<NSString *, NSValue *> *hoLifecycleOriginals;
 static NSMutableArray<NSMutableDictionary *> *hoBlockObservers;
 static NSMutableArray<NSMutableDictionary *> *hoTargetObservers;
 static NSHashTable<WKUserContentController *> *hoScriptControllers;
@@ -42,6 +44,8 @@ static NSMutableSet<NSValue *> *hoHookedMethods;
 static UITapGestureRecognizer *hoGesture;
 static id hoGestureTarget;
 static UIWindow *hoMenuWindow;
+static CGPoint hoMenuOffset = CGPointZero;
+static CGPoint hoPanStartCenter = CGPointZero;
 static NSTimeInterval hoLastTapTime = 0;
 
 static BOOL HOUnblocked(HOToggle toggle) {
@@ -337,6 +341,39 @@ static void HOHookPlugins(void) {
     }
 }
 
+static void HOHookLifecycleDelegates(void) {
+    NSArray<NSDictionary *> *specs = @[
+        @{@"class": @"_TtC6Runner11AppDelegate", @"selector": @"applicationWillResignActive:", @"alias": @"ho_applicationWillResignActive:"},
+        @{@"class": @"_TtC6Runner11AppDelegate", @"selector": @"applicationDidEnterBackground:", @"alias": @"ho_applicationDidEnterBackground:"},
+        @{@"class": @"_TtC6Runner13SceneDelegate", @"selector": @"sceneWillResignActive:", @"alias": @"ho_sceneWillResignActive:"},
+        @{@"class": @"_TtC6Runner13SceneDelegate", @"selector": @"sceneDidEnterBackground:", @"alias": @"ho_sceneDidEnterBackground:"}
+    ];
+    for (NSDictionary *spec in specs) {
+        Class cls = NSClassFromString(spec[@"class"]);
+        if (!cls) {
+            continue;
+        }
+        NSString *selectorName = spec[@"selector"];
+        NSString *key = [NSString stringWithFormat:@"%@|%@", spec[@"class"], selectorName];
+        SEL selector = NSSelectorFromString(selectorName);
+        IMP capturedOriginal = NULL;
+        HOReplaceMethod(cls, selector, [spec[@"alias"] UTF8String], ^void(id self, id argument) {
+            if (HOUnblocked(HOToggleLockWarning)) {
+                hoPendingLeaveWarning = YES;
+                return;
+            }
+            IMP stored = (IMP)[hoLifecycleOriginals[key] pointerValue];
+            void (*original)(id, SEL, id) = (void *)stored;
+            if (original) {
+                original(self, NSSelectorFromString(selectorName), argument);
+            }
+        }, &capturedOriginal);
+        if (capturedOriginal) {
+            hoLifecycleOriginals[key] = [NSValue valueWithPointer:capturedOriginal];
+        }
+    }
+}
+
 static BOOL HOLooksLikeLockWarning(UIViewController *viewController) {
     if (![viewController isKindOfClass:UIAlertController.class]) {
         return NO;
@@ -458,6 +495,28 @@ static void HOHookAlerts(void) {
     }];
 }
 
++ (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    UIView *panel = gesture.view;
+    if (!panel || !panel.superview) {
+        return;
+    }
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        hoPanStartCenter = panel.center;
+    }
+    CGPoint translation = [gesture translationInView:panel.superview];
+    CGPoint next = CGPointMake(hoPanStartCenter.x + translation.x, hoPanStartCenter.y + translation.y);
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    CGFloat halfWidth = panel.bounds.size.width / 2;
+    CGFloat halfHeight = panel.bounds.size.height / 2;
+    next.x = MIN(MAX(next.x, halfWidth + 6), screen.width - halfWidth - 6);
+    next.y = MIN(MAX(next.y, halfHeight + 6), screen.height - halfHeight - 6);
+    panel.center = next;
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        CGRect base = CGRectMake((screen.width - 340) / 2, (screen.height - 455) / 2, 340, 455);
+        hoMenuOffset = CGPointMake(next.x - CGRectGetMidX(base), next.y - CGRectGetMidY(base));
+    }
+}
+
 + (void)show {
     if (!hoMenuWindow) {
         hoMenuWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -504,7 +563,10 @@ static void HOHookAlerts(void) {
 + (UIView *)buildPanel {
     UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:effect];
-    panel.frame = CGRectMake((UIScreen.mainScreen.bounds.size.width - 340) / 2, (UIScreen.mainScreen.bounds.size.height - 455) / 2, 340, 455);
+    CGRect panelFrame = CGRectMake((UIScreen.mainScreen.bounds.size.width - 340) / 2, (UIScreen.mainScreen.bounds.size.height - 455) / 2, 340, 455);
+    panelFrame.origin.x += hoMenuOffset.x;
+    panelFrame.origin.y += hoMenuOffset.y;
+    panel.frame = panelFrame;
     panel.layer.cornerRadius = 22;
     panel.layer.borderWidth = 0.5;
     panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
@@ -514,6 +576,11 @@ static void HOHookAlerts(void) {
     UIView *accent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 340, 3)];
     accent.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
     [panel.contentView addSubview:accent];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    pan.cancelsTouchesInView = NO;
+    pan.delaysTouchesBegan = NO;
+    [panel addGestureRecognizer:pan];
 
     [panel.contentView addSubview:[self labelWithText:@"HO CONTROL" frame:CGRectMake(18, 18, 220, 28) fontSize:20 bold:YES]];
     [panel.contentView addSubview:[self labelWithText:@"OFF = bảo vệ   ON = bỏ chặn" frame:CGRectMake(18, 47, 250, 18) fontSize:12 bold:NO]];
@@ -614,6 +681,7 @@ __attribute__((constructor)) static void HOEntry(void) {
         hoScriptControllers = [NSHashTable weakObjectsHashTable];
         hoHookedMethods = [NSMutableSet set];
         hoPluginOriginals = [NSMutableDictionary dictionary];
+        hoLifecycleOriginals = [NSMutableDictionary dictionary];
         [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
             if (HOUnblocked(HOToggleLockWarning)) {
                 hoPendingLeaveWarning = YES;
@@ -636,6 +704,7 @@ __attribute__((constructor)) static void HOEntry(void) {
         HOHookNotificationCenter();
         HOHookWebView();
         HOHookPlugins();
+        HOHookLifecycleDelegates();
         HOHookAlerts();
         dispatch_async(dispatch_get_main_queue(), ^{
             HOInstallGesture();
