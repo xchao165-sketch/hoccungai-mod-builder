@@ -13,6 +13,16 @@
 
 static NSString *const HOIconImageURL = @"https://imgs.search.brave.com/Gll420MeLwA4SVJxJEp_QrJQbBsytXon6-FLTXpSt08/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9pbWFn/ZXMucGV4ZWxzLmNv/bS9waG90b3MvMzg4/MDA0OS9wZXhlbHMt/cGhvdG8tMzg4MDA0/OS5qcGVnP2NzPXRp/bnlzcmdiJmRwcj0x/Jnc9NTAw";
 
+@interface HOOverlayWindow : UIWindow
+@end
+
+@implementation HOOverlayWindow
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+@end
+
 @interface HOMenu : NSObject
 + (void)show;
 + (void)hide;
@@ -75,6 +85,26 @@ static BOOL HOUnblocked(HOToggle toggle) {
 
 static BOOL HOProtectionEnabled(HOToggle toggle) {
     return !hoStates[toggle];
+}
+
+static NSString *HOProtectionDetail(HOToggle toggle, BOOL enabled) {
+    if (!enabled) {
+        return @"Tắt: MOD không can thiệp";
+    }
+    switch (toggle) {
+        case HOToggleScreenshot:
+            return @"Bật: chặn app chụp màn hình";
+        case HOToggleRecord:
+            return @"Bật: chặn app quay màn hình";
+        case HOToggleLogout:
+            return @"Bật: chặn app logout / ghi log";
+        case HOToggleSessionJS:
+            return @"Bật: chặn app đẩy JS session/device";
+        case HOToggleLockWarning:
+            return @"Bật: chặn cờ rời bài";
+        default:
+            return @"Bật: MOD đang can thiệp";
+    }
 }
 
 static NSSet<NSString *> *HOScreenshotNotificationNames(void) {
@@ -658,7 +688,7 @@ static void HOHookAlerts(void) {
         return;
     }
     if (!hoMenuWindow) {
-        hoMenuWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+        hoMenuWindow = [[HOOverlayWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         hoMenuWindow.windowLevel = UIWindowLevelAlert + 100;
         hoMenuWindow.backgroundColor = UIColor.clearColor;
         hoMenuWindow.tag = HO_MENU_TAG;
@@ -740,7 +770,7 @@ static void HOHookAlerts(void) {
     [panel addGestureRecognizer:pinch];
 
     [panel.contentView addSubview:[self labelWithText:@"MOD MENU BY ANONYMOUS" frame:CGRectMake(18, 15, 260, 26) fontSize:17 bold:YES]];
-    [panel.contentView addSubview:[self labelWithText:@"TẮT = chưa bảo vệ   BẬT = đang bảo vệ" frame:CGRectMake(18, 42, 290, 16) fontSize:11 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"BẬT = MOD chặn   TẮT = app chạy bình thường" frame:CGRectMake(18, 42, 290, 16) fontSize:11 bold:NO]];
 
     UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(282, 14, 44, 28) action:@selector(close) target:self];
     [panel.contentView addSubview:close];
@@ -773,7 +803,7 @@ static void HOHookAlerts(void) {
         BOOL rowProtected = HOProtectionEnabled((HOToggle)index);
         UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 4, 220, 18) fontSize:14 bold:YES];
         [row addSubview:title];
-        UILabel *detail = [self labelWithText:rowProtected ? @"Đang bảo vệ" : @"Chưa có bảo vệ" frame:CGRectMake(14, 23, 220, 14) fontSize:11 bold:NO];
+        UILabel *detail = [self labelWithText:HOProtectionDetail((HOToggle)index, rowProtected) frame:CGRectMake(14, 23, 220, 14) fontSize:11 bold:NO];
         detail.textColor = [UIColor colorWithWhite:0.72 alpha:1];
         [row addSubview:detail];
 
@@ -791,8 +821,8 @@ static void HOHookAlerts(void) {
     [panel.contentView addSubview:[self buttonWithTitle:@"Thu thành icon" frame:CGRectMake(18, 392, 148, 40) action:@selector(minimize) target:self]];
     [panel.contentView addSubview:[self buttonWithTitle:@"Reset zoom" frame:CGRectMake(174, 392, 148, 40) action:@selector(resetZoom) target:self]];
     [panel.contentView addSubview:[self labelWithText:@"Kéo = di chuyển · Chụm = thu phóng" frame:CGRectMake(18, 442, 304, 16) fontSize:11 bold:NO]];
-    [panel.contentView addSubview:[self labelWithText:@"Chỉ áp dụng trong phiên hiện tại" frame:CGRectMake(18, 466, 304, 16) fontSize:11 bold:NO]];
-    [panel.contentView addSubview:[self labelWithText:@"v4 · Anonymous" frame:CGRectMake(18, 500, 304, 14) fontSize:10 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"Bật = MOD can thiệp · Tắt = app chạy gốc · chỉ trong phiên này" frame:CGRectMake(18, 466, 304, 16) fontSize:10 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"v5 · Anonymous" frame:CGRectMake(18, 500, 304, 14) fontSize:10 bold:NO]];
     panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
     return panel;
 }
