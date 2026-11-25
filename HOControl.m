@@ -9,6 +9,8 @@
 + (void)show;
 + (void)hide;
 + (void)installGesture;
++ (void)showLeaveWarning;
++ (UIViewController *)topViewController;
 + (void)change:(HOSwitch *)sender;
 + (void)allOn;
 + (void)allOff;
@@ -23,7 +25,9 @@ typedef NS_ENUM(NSInteger, HOToggle) {
     HOToggleCount
 };
 
-static BOOL hoStates[HOToggleCount] = {YES, YES, YES, YES, YES};
+static BOOL hoStates[HOToggleCount] = {NO, NO, NO, NO, NO};
+static BOOL hoPendingLeaveWarning = NO;
+static BOOL hoPresentingOwnWarning = NO;
 static IMP HOOrigAddObserverBlock;
 static IMP HOOrigAddObserverTarget;
 static IMP HOOrigAddScriptHandler;
@@ -40,7 +44,7 @@ static id hoGestureTarget;
 static UIWindow *hoMenuWindow;
 static NSTimeInterval hoLastTapTime = 0;
 
-static BOOL HOEnabled(HOToggle toggle) {
+static BOOL HOUnblocked(HOToggle toggle) {
     return hoStates[toggle];
 }
 
@@ -50,6 +54,10 @@ static NSSet<NSString *> *HOScreenshotNotificationNames(void) {
 
 static NSSet<NSString *> *HORecordNotificationNames(void) {
     return [NSSet setWithObjects:UIScreenCapturedDidChangeNotification, nil];
+}
+
+static NSSet<NSString *> *HOLifecycleNotificationNames(void) {
+    return [NSSet setWithObjects:UIApplicationWillResignActiveNotification, UIApplicationDidEnterBackgroundNotification, nil];
 }
 
 static NSSet<NSString *> *HOLogoutHandlerNames(void) {
@@ -126,18 +134,18 @@ static void HORemoveLogoutScriptHandlers(void) {
     }
 }
 
-static void HOApplyToggle(HOToggle toggle, BOOL enabled) {
-    hoStates[toggle] = enabled;
-    if (!enabled && toggle == HOToggleScreenshot) {
+static void HOApplyToggle(HOToggle toggle, BOOL unblocked) {
+    hoStates[toggle] = unblocked;
+    if (unblocked && toggle == HOToggleScreenshot) {
         HORemoveProtectionViews();
         HORemoveBlockObserversForNames(HOScreenshotNotificationNames());
         HORemoveTargetObserversForNames(HOScreenshotNotificationNames());
     }
-    if (!enabled && toggle == HOToggleRecord) {
+    if (unblocked && toggle == HOToggleRecord) {
         HORemoveBlockObserversForNames(HORecordNotificationNames());
         HORemoveTargetObserversForNames(HORecordNotificationNames());
     }
-    if (!enabled && toggle == HOToggleLogout) {
+    if (unblocked && toggle == HOToggleLogout) {
         HORemoveLogoutScriptHandlers();
     }
 }
@@ -178,9 +186,11 @@ static void HOHookNotificationCenter(void) {
     HOReplaceMethod(centerClass, @selector(addObserverForName:object:queue:usingBlock:), "ho_addObserverForName:object:queue:usingBlock:", ^id(id self, NSString *name, id object, NSOperationQueue *queue, void (^notificationBlock)(NSNotification *)) {
         BOOL allowed = YES;
         if ([HOScreenshotNotificationNames() containsObject:name]) {
-            allowed = HOEnabled(HOToggleScreenshot);
+            allowed = !HOUnblocked(HOToggleScreenshot);
         } else if ([HORecordNotificationNames() containsObject:name]) {
-            allowed = HOEnabled(HOToggleRecord);
+            allowed = !HOUnblocked(HOToggleRecord);
+        } else if ([HOLifecycleNotificationNames() containsObject:name]) {
+            allowed = !HOUnblocked(HOToggleLockWarning);
         }
         if (!allowed) {
             return [NSObject new];
@@ -199,9 +209,11 @@ static void HOHookNotificationCenter(void) {
     HOReplaceMethod(centerClass, @selector(addObserver:selector:name:object:), "ho_addObserver:selector:name:object:", ^void(id self, id observer, SEL selector, NSString *name, id object) {
         BOOL allowed = YES;
         if ([HOScreenshotNotificationNames() containsObject:name]) {
-            allowed = HOEnabled(HOToggleScreenshot);
+            allowed = !HOUnblocked(HOToggleScreenshot);
         } else if ([HORecordNotificationNames() containsObject:name]) {
-            allowed = HOEnabled(HOToggleRecord);
+            allowed = !HOUnblocked(HOToggleRecord);
+        } else if ([HOLifecycleNotificationNames() containsObject:name]) {
+            allowed = !HOUnblocked(HOToggleLockWarning);
         }
         if (!allowed) {
             return;
@@ -222,7 +234,7 @@ static void HOHookNotificationCenter(void) {
 static void HOHookWebView(void) {
     HOReplaceMethod(WKUserContentController.class, @selector(addScriptMessageHandler:name:), "ho_addScriptMessageHandler:name:", ^void(WKUserContentController *self, id<WKScriptMessageHandler> handler, NSString *name) {
         [hoScriptControllers addObject:self];
-        if (!HOEnabled(HOToggleLogout) && [HOLogoutHandlerNames() containsObject:name]) {
+        if (HOUnblocked(HOToggleLogout) && [HOLogoutHandlerNames() containsObject:name]) {
             return;
         }
         void (*original)(id, SEL, id, NSString *) = (void *)HOOrigAddScriptHandler;
@@ -240,7 +252,7 @@ static void HOHookWebView(void) {
     }, &HOOrigRemoveScriptHandler);
 
     HOReplaceMethod(WKWebView.class, @selector(evaluateJavaScript:completionHandler:), "ho_evaluateJavaScript:completionHandler:", ^void(WKWebView *self, NSString *script, void (^completion)(id, NSError *)) {
-        if (!HOEnabled(HOToggleSessionJS)) {
+        if (HOUnblocked(HOToggleSessionJS)) {
             for (NSString *marker in HOBlockedJSMarkers()) {
                 if ([script containsString:marker]) {
                     if (completion) {
@@ -297,19 +309,19 @@ static void HOHookPlugins(void) {
             } @catch (__unused NSException *exception) {
                 method = nil;
             }
-            if (!HOEnabled(HOToggleScreenshot) && HOIsScreenshotMethod(method)) {
+            if (HOUnblocked(HOToggleScreenshot) && HOIsScreenshotMethod(method)) {
                 HOAnswer(result, @YES);
                 return;
             }
-            if ([method isEqualToString:@"isPreventScreenshotEnabled"] && !HOEnabled(HOToggleScreenshot)) {
+            if ([method isEqualToString:@"isPreventScreenshotEnabled"] && HOUnblocked(HOToggleScreenshot)) {
                 HOAnswer(result, @NO);
                 return;
             }
-            if (!HOEnabled(HOToggleRecord) && HOIsRecordMethod(method)) {
+            if (HOUnblocked(HOToggleRecord) && HOIsRecordMethod(method)) {
                 HOAnswer(result, @YES);
                 return;
             }
-            if ([method isEqualToString:@"isPreventScreenRecordingEnabled"] && !HOEnabled(HOToggleRecord)) {
+            if ([method isEqualToString:@"isPreventScreenRecordingEnabled"] && HOUnblocked(HOToggleRecord)) {
                 HOAnswer(result, @NO);
                 return;
             }
@@ -342,7 +354,7 @@ static BOOL HOLooksLikeLockWarning(UIViewController *viewController) {
 
 static void HOHookAlerts(void) {
     HOReplaceMethod(UIViewController.class, @selector(presentViewController:animated:completion:), "ho_presentViewController:animated:completion:", ^void(UIViewController *self, UIViewController *viewController, BOOL animated, void (^completion)(void)) {
-        if (!HOEnabled(HOToggleLockWarning) && HOLooksLikeLockWarning(viewController)) {
+        if (!hoPresentingOwnWarning && HOUnblocked(HOToggleLockWarning) && HOLooksLikeLockWarning(viewController)) {
             if (completion) {
                 completion();
             }
@@ -419,6 +431,33 @@ static void HOHookAlerts(void) {
     }
 }
 
++ (UIViewController *)topViewController {
+    UIViewController *controller = [self keyWindow].rootViewController;
+    while (controller.presentedViewController) {
+        controller = controller.presentedViewController;
+    }
+    if ([controller isKindOfClass:UINavigationController.class]) {
+        controller = ((UINavigationController *)controller).visibleViewController ?: controller;
+    }
+    if ([controller isKindOfClass:UITabBarController.class]) {
+        controller = ((UITabBarController *)controller).selectedViewController ?: controller;
+    }
+    return controller;
+}
+
++ (void)showLeaveWarning {
+    UIViewController *controller = [self topViewController];
+    if (!controller) {
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cảnh báo" message:@"Bạn vừa rời màn hình làm bài. Nhấn Tiếp tục để quay lại." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Tiếp tục" style:UIAlertActionStyleDefault handler:nil]];
+    hoPresentingOwnWarning = YES;
+    [controller presentViewController:alert animated:YES completion:^{
+        hoPresentingOwnWarning = NO;
+    }];
+}
+
 + (void)show {
     if (!hoMenuWindow) {
         hoMenuWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
@@ -465,36 +504,72 @@ static void HOHookAlerts(void) {
 + (UIView *)buildPanel {
     UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:effect];
-    panel.frame = CGRectMake((UIScreen.mainScreen.bounds.size.width - 330) / 2, (UIScreen.mainScreen.bounds.size.height - 430) / 2, 330, 430);
-    panel.layer.cornerRadius = 18;
+    panel.frame = CGRectMake((UIScreen.mainScreen.bounds.size.width - 340) / 2, (UIScreen.mainScreen.bounds.size.height - 455) / 2, 340, 455);
+    panel.layer.cornerRadius = 22;
+    panel.layer.borderWidth = 0.5;
+    panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
     panel.clipsToBounds = YES;
-    panel.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.2];
+    panel.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
 
-    [panel.contentView addSubview:[self labelWithText:@"MENU ĐIỀU KHIỂN" frame:CGRectMake(18, 16, 230, 30) fontSize:19 bold:YES]];
-    [panel.contentView addSubview:[self labelWithText:@"Bật = giữ bảo vệ như gốc" frame:CGRectMake(18, 46, 250, 20) fontSize:12 bold:NO]];
+    UIView *accent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 340, 3)];
+    accent.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
+    [panel.contentView addSubview:accent];
 
-    UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(264, 16, 52, 30) action:@selector(close) target:self];
+    [panel.contentView addSubview:[self labelWithText:@"HO CONTROL" frame:CGRectMake(18, 18, 220, 28) fontSize:20 bold:YES]];
+    [panel.contentView addSubview:[self labelWithText:@"OFF = bảo vệ   ON = bỏ chặn" frame:CGRectMake(18, 47, 250, 18) fontSize:12 bold:NO]];
+
+    UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(272, 18, 52, 28) action:@selector(close) target:self];
     [panel.contentView addSubview:close];
 
-    NSArray<NSString *> *titles = @[@"Chặn chụp màn hình", @"Chặn quay màn hình", @"Log thoát/logout", @"Session/device JS", @"Lock warning"];
+    BOOL anyUnblocked = NO;
+    for (NSInteger index = 0; index < HOToggleCount; index++) {
+        if (HOUnblocked((HOToggle)index)) {
+            anyUnblocked = YES;
+            break;
+        }
+    }
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(18, 75, 304, 28)];
+    pill.layer.cornerRadius = 14;
+    pill.backgroundColor = anyUnblocked ? [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:0.18] : [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:0.16];
+    [panel.contentView addSubview:pill];
+    UILabel *pillLabel = [self labelWithText:anyUnblocked ? @"TRẠNG THÁI: ĐANG BỎ CHẶN" : @"TRẠNG THÁI: ĐANG BẢO VỆ" frame:CGRectMake(12, 5, 280, 18) fontSize:12 bold:YES];
+    pillLabel.textColor = anyUnblocked ? [UIColor colorWithRed:1.0 green:0.72 blue:0.42 alpha:1] : [UIColor colorWithRed:0.45 green:0.9 blue:1.0 alpha:1];
+    [pill addSubview:pillLabel];
+
+    NSArray<NSString *> *titles = @[@"Bỏ chặn chụp màn hình", @"Bỏ chặn quay màn hình", @"Bỏ chặn logout/log", @"Bỏ chặn session/device JS", @"Bỏ chặn rời bài"];
     for (NSInteger index = 0; index < titles.count; index++) {
-        CGFloat y = 88 + index * 48;
-        [panel.contentView addSubview:[self labelWithText:titles[index] frame:CGRectMake(18, y, 220, 30) fontSize:15 bold:NO]];
-        HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(254, y - 2, 51, 31)];
+        CGFloat y = 114 + index * 49;
+        UIView *row = [[UIView alloc] initWithFrame:CGRectMake(12, y, 316, 44)];
+        row.layer.cornerRadius = 12;
+        row.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.055];
+        [panel.contentView addSubview:row];
+
+        BOOL rowUnblocked = HOUnblocked((HOToggle)index);
+        UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 5, 220, 18) fontSize:14 bold:YES];
+        [row addSubview:title];
+        UILabel *detail = [self labelWithText:rowUnblocked ? @"Đang bỏ chặn" : @"Đang bảo vệ" frame:CGRectMake(14, 24, 220, 14) fontSize:11 bold:NO];
+        detail.textColor = [UIColor colorWithWhite:0.72 alpha:1];
+        [row addSubview:detail];
+
+        HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(254, 7, 51, 31)];
         toggle.hoIndex = index;
-        toggle.on = HOEnabled((HOToggle)index);
+        toggle.on = rowUnblocked;
+        toggle.onTintColor = [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:1];
+        toggle.tintColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+        toggle.thumbTintColor = UIColor.whiteColor;
         [toggle addTarget:self action:@selector(change:) forControlEvents:UIControlEventValueChanged];
-        [panel.contentView addSubview:toggle];
+        [row addSubview:toggle];
     }
 
-    [panel.contentView addSubview:[self buttonWithTitle:@"Bật tất cả" frame:CGRectMake(18, 344, 140, 40) action:@selector(allOn) target:self]];
-    [panel.contentView addSubview:[self buttonWithTitle:@"Tắt tất cả" frame:CGRectMake(172, 344, 140, 40) action:@selector(allOff) target:self]];
-    [panel.contentView addSubview:[self labelWithText:@"Chỉ áp dụng trong phiên hiện tại" frame:CGRectMake(18, 398, 294, 18) fontSize:12 bold:NO]];
+    [panel.contentView addSubview:[self buttonWithTitle:@"Bỏ chặn tất cả" frame:CGRectMake(18, 372, 148, 40) action:@selector(allOn) target:self]];
+    [panel.contentView addSubview:[self buttonWithTitle:@"Bảo vệ tất cả" frame:CGRectMake(174, 372, 148, 40) action:@selector(allOff) target:self]];
+    [panel.contentView addSubview:[self labelWithText:@"Chỉ áp dụng trong phiên hiện tại" frame:CGRectMake(18, 424, 304, 16) fontSize:11 bold:NO]];
     return panel;
 }
 
 + (void)change:(HOSwitch *)sender {
     HOApplyToggle((HOToggle)sender.hoIndex, sender.isOn);
+    [self show];
 }
 
 + (void)allOn {
@@ -539,6 +614,25 @@ __attribute__((constructor)) static void HOEntry(void) {
         hoScriptControllers = [NSHashTable weakObjectsHashTable];
         hoHookedMethods = [NSMutableSet set];
         hoPluginOriginals = [NSMutableDictionary dictionary];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            if (HOUnblocked(HOToggleLockWarning)) {
+                hoPendingLeaveWarning = YES;
+            }
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            if (HOUnblocked(HOToggleLockWarning)) {
+                hoPendingLeaveWarning = YES;
+            }
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            HOInstallGesture();
+            if (hoPendingLeaveWarning && HOUnblocked(HOToggleLockWarning)) {
+                hoPendingLeaveWarning = NO;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [HOMenu showLeaveWarning];
+                });
+            }
+        }];
         HOHookNotificationCenter();
         HOHookWebView();
         HOHookPlugins();
