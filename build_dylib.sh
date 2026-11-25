@@ -11,6 +11,8 @@ clang -dynamiclib \
   -framework Foundation \
   -framework UIKit \
   -framework WebKit \
+  -framework CoreGraphics \
+  -framework QuartzCore \
   -Wl,-install_name,@executable_path/Frameworks/HOControl.dylib \
   -o HOControl.dylib \
   HOControl.m
