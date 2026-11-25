@@ -5,12 +5,30 @@
 
 @class HOSwitch;
 
+#define HO_MENU_TAG 981372
+#define HO_ICON_TAG 981373
+#define HO_PANEL_WIDTH 340.0
+#define HO_PANEL_HEIGHT 540.0
+#define HO_ICON_SIZE 56.0
+
+static NSString *const HOIconImageURL = @"https://imgs.search.brave.com/Gll420MeLwA4SVJxJEp_QrJQbBsytXon6-FLTXpSt08/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9pbWFn/ZXMucGV4ZWxzLmNv/bS9waG90b3MvMzg4/MDA0OS9wZXhlbHMt/cGhvdG8tMzg4MDA0/OS5qcGVnP2NzPXRp/bnlzcmdiJmRwcj0x/Jnc9NTAw";
+
 @interface HOMenu : NSObject
 + (void)show;
 + (void)hide;
 + (void)installGesture;
-+ (void)showLeaveWarning;
 + (void)handlePan:(UIPanGestureRecognizer *)gesture;
++ (void)handlePinch:(UIPinchGestureRecognizer *)gesture;
++ (void)handleIconPan:(UIPanGestureRecognizer *)gesture;
++ (void)minimize;
++ (void)restore;
++ (void)resetZoom;
++ (UIWindow *)appWindow;
++ (CGPoint)baseMenuCenter;
++ (CGPoint)menuCenter;
++ (CGPoint)floatingIconCenter;
++ (UIButton *)floatingIcon;
++ (void)loadIconImageForButton:(UIButton *)button;
 + (UIViewController *)topViewController;
 + (void)change:(HOSwitch *)sender;
 + (void)allOn;
@@ -27,8 +45,6 @@ typedef NS_ENUM(NSInteger, HOToggle) {
 };
 
 static BOOL hoStates[HOToggleCount] = {NO, NO, NO, NO, NO};
-static BOOL hoPendingLeaveWarning = NO;
-static BOOL hoPresentingOwnWarning = NO;
 static IMP HOOrigAddObserverBlock;
 static IMP HOOrigAddObserverTarget;
 static IMP HOOrigAddScriptHandler;
@@ -46,10 +62,19 @@ static id hoGestureTarget;
 static UIWindow *hoMenuWindow;
 static CGPoint hoMenuOffset = {0.0, 0.0};
 static CGPoint hoPanStartCenter = {0.0, 0.0};
+static CGFloat hoMenuScale = 1.0;
+static CGFloat hoPinchStartScale = 1.0;
+static CGPoint hoIconCenter = {0.0, 0.0};
+static CGPoint hoIconPanStart = {0.0, 0.0};
+static BOOL hoIconVisible = NO;
 static NSTimeInterval hoLastTapTime = 0;
 
 static BOOL HOUnblocked(HOToggle toggle) {
     return hoStates[toggle];
+}
+
+static BOOL HOProtectionEnabled(HOToggle toggle) {
+    return !hoStates[toggle];
 }
 
 static NSSet<NSString *> *HOScreenshotNotificationNames(void) {
@@ -359,7 +384,6 @@ static void HOHookLifecycleDelegates(void) {
         IMP capturedOriginal = NULL;
         HOReplaceMethod(cls, selector, [spec[@"alias"] UTF8String], ^void(id self, id argument) {
             if (HOUnblocked(HOToggleLockWarning)) {
-                hoPendingLeaveWarning = YES;
                 return;
             }
             IMP stored = (IMP)[hoLifecycleOriginals[key] pointerValue];
@@ -391,7 +415,7 @@ static BOOL HOLooksLikeLockWarning(UIViewController *viewController) {
 
 static void HOHookAlerts(void) {
     HOReplaceMethod(UIViewController.class, @selector(presentViewController:animated:completion:), "ho_presentViewController:animated:completion:", ^void(UIViewController *self, UIViewController *viewController, BOOL animated, void (^completion)(void)) {
-        if (!hoPresentingOwnWarning && HOUnblocked(HOToggleLockWarning) && HOLooksLikeLockWarning(viewController)) {
+        if (HOUnblocked(HOToggleLockWarning) && HOLooksLikeLockWarning(viewController)) {
             if (completion) {
                 completion();
             }
@@ -410,7 +434,7 @@ static void HOHookAlerts(void) {
 @implementation HOGestureTarget
 
 - (void)handleTap:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateEnded) {
+    if (gesture.state != UIGestureRecognizerStateEnded || gesture.view != [HOMenu appWindow]) {
         return;
     }
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
@@ -455,13 +479,35 @@ static void HOHookAlerts(void) {
     return UIApplication.sharedApplication.keyWindow;
 }
 
++ (UIWindow *)appWindow {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] || scene.activationState != UISceneActivationStateForegroundActive) {
+            continue;
+        }
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window == hoMenuWindow || window.tag == HO_MENU_TAG || !window.rootViewController) {
+                continue;
+            }
+            return window;
+        }
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window != hoMenuWindow && window.tag != HO_MENU_TAG && window.rootViewController) {
+            return window;
+        }
+    }
+    return nil;
+}
+
 + (void)installGesture {
-    UIWindow *window = [self keyWindow];
+    UIWindow *window = [self appWindow];
     if (!window || !hoGesture) {
         return;
     }
-    if (hoGesture.view && hoGesture.view != window) {
-        [hoGesture.view removeGestureRecognizer:hoGesture];
+    for (UIWindow *existing in UIApplication.sharedApplication.windows.copy) {
+        if (existing != window && [existing.gestureRecognizers containsObject:hoGesture]) {
+            [existing removeGestureRecognizer:hoGesture];
+        }
     }
     if (![window.gestureRecognizers containsObject:hoGesture]) {
         [window addGestureRecognizer:hoGesture];
@@ -469,7 +515,7 @@ static void HOHookAlerts(void) {
 }
 
 + (UIViewController *)topViewController {
-    UIViewController *controller = [self keyWindow].rootViewController;
+    UIViewController *controller = [self appWindow].rootViewController;
     while (controller.presentedViewController) {
         controller = controller.presentedViewController;
     }
@@ -482,17 +528,22 @@ static void HOHookAlerts(void) {
     return controller;
 }
 
-+ (void)showLeaveWarning {
-    UIViewController *controller = [self topViewController];
-    if (!controller) {
-        return;
++ (CGPoint)baseMenuCenter {
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    return CGPointMake(screen.width / 2, screen.height / 2);
+}
+
++ (CGPoint)menuCenter {
+    CGPoint base = [self baseMenuCenter];
+    return CGPointMake(base.x + hoMenuOffset.x, base.y + hoMenuOffset.y);
+}
+
++ (CGPoint)floatingIconCenter {
+    if (hoIconCenter.x == 0.0 && hoIconCenter.y == 0.0) {
+        CGSize screen = UIScreen.mainScreen.bounds.size;
+        hoIconCenter = CGPointMake(screen.width - HO_ICON_SIZE, 140.0);
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Cảnh báo" message:@"Bạn vừa rời màn hình làm bài. Nhấn Tiếp tục để quay lại." preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Tiếp tục" style:UIAlertActionStyleDefault handler:nil]];
-    hoPresentingOwnWarning = YES;
-    [controller presentViewController:alert animated:YES completion:^{
-        hoPresentingOwnWarning = NO;
-    }];
+    return hoIconCenter;
 }
 
 + (void)handlePan:(UIPanGestureRecognizer *)gesture {
@@ -506,33 +557,138 @@ static void HOHookAlerts(void) {
     CGPoint translation = [gesture translationInView:panel.superview];
     CGPoint next = CGPointMake(hoPanStartCenter.x + translation.x, hoPanStartCenter.y + translation.y);
     CGSize screen = UIScreen.mainScreen.bounds.size;
-    CGFloat halfWidth = panel.bounds.size.width / 2;
-    CGFloat halfHeight = panel.bounds.size.height / 2;
+    CGFloat halfWidth = panel.frame.size.width / 2;
+    CGFloat halfHeight = panel.frame.size.height / 2;
     next.x = MIN(MAX(next.x, halfWidth + 6), screen.width - halfWidth - 6);
     next.y = MIN(MAX(next.y, halfHeight + 6), screen.height - halfHeight - 6);
     panel.center = next;
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
-        CGRect base = CGRectMake((screen.width - 340) / 2, (screen.height - 455) / 2, 340, 455);
-        hoMenuOffset = CGPointMake(next.x - (base.origin.x + base.size.width / 2), next.y - (base.origin.y + base.size.height / 2));
+        CGPoint base = [self baseMenuCenter];
+        hoMenuOffset = CGPointMake(next.x - base.x, next.y - base.y);
     }
 }
 
++ (void)handlePinch:(UIPinchGestureRecognizer *)gesture {
+    UIView *panel = gesture.view;
+    if (!panel) {
+        return;
+    }
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        hoPinchStartScale = hoMenuScale;
+    }
+    CGFloat scale = hoPinchStartScale * gesture.scale;
+    hoMenuScale = MIN(MAX(scale, 0.55), 1.7);
+    panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        hoPinchStartScale = hoMenuScale;
+    }
+}
+
++ (void)handleIconPan:(UIPanGestureRecognizer *)gesture {
+    UIView *icon = gesture.view;
+    if (!icon) {
+        return;
+    }
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        hoIconPanStart = icon.center;
+    }
+    CGPoint translation = [gesture translationInView:icon.superview];
+    CGPoint next = CGPointMake(hoIconPanStart.x + translation.x, hoIconPanStart.y + translation.y);
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    CGFloat half = HO_ICON_SIZE / 2 + 6;
+    next.x = MIN(MAX(next.x, half), screen.width - half);
+    next.y = MIN(MAX(next.y, half), screen.height - half);
+    icon.center = next;
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        hoIconCenter = next;
+    }
+}
+
++ (void)loadIconImageForButton:(UIButton *)button {
+    NSURL *url = [NSURL URLWithString:HOIconImageURL];
+    if (!url) {
+        return;
+    }
+    [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
+        UIImage *image = [UIImage imageWithData:data];
+        if (!image) {
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [button setImage:image forState:UIControlStateNormal];
+            [button setTitle:nil forState:UIControlStateNormal];
+            button.imageView.contentMode = UIViewContentModeScaleAspectFill;
+            button.imageView.clipsToBounds = YES;
+        });
+    }] resume];
+}
+
++ (UIButton *)floatingIcon {
+    for (UIView *view in hoMenuWindow.subviews.copy) {
+        if (view.tag == HO_ICON_TAG && [view isKindOfClass:UIButton.class]) {
+            return (UIButton *)view;
+        }
+    }
+    UIButton *icon = [UIButton buttonWithType:UIButtonTypeCustom];
+    icon.tag = HO_ICON_TAG;
+    icon.frame = CGRectMake(0, 0, HO_ICON_SIZE, HO_ICON_SIZE);
+    icon.center = [self floatingIconCenter];
+    icon.layer.cornerRadius = HO_ICON_SIZE / 2;
+    icon.layer.borderWidth = 1.0;
+    icon.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.42].CGColor;
+    icon.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.82];
+    icon.clipsToBounds = YES;
+    icon.imageView.contentMode = UIViewContentModeScaleAspectFill;
+    icon.imageView.clipsToBounds = YES;
+    icon.accessibilityLabel = @"MOD MENU BY ANONYMOUS";
+    [icon setTitle:@"M" forState:UIControlStateNormal];
+    [icon setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [icon addTarget:self action:@selector(restore) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleIconPan:)];
+    pan.cancelsTouchesInView = NO;
+    [icon addGestureRecognizer:pan];
+    [self loadIconImageForButton:icon];
+    return icon;
+}
+
 + (void)show {
+    if (hoIconVisible) {
+        [self restore];
+        return;
+    }
     if (!hoMenuWindow) {
         hoMenuWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         hoMenuWindow.windowLevel = UIWindowLevelAlert + 100;
         hoMenuWindow.backgroundColor = UIColor.clearColor;
+        hoMenuWindow.tag = HO_MENU_TAG;
         hoMenuWindow.hidden = YES;
+    }
+    for (UIWindow *window in UIApplication.sharedApplication.windows.copy) {
+        if (window != hoMenuWindow && window.tag == HO_MENU_TAG) {
+            window.hidden = YES;
+        }
     }
     for (UIView *view in hoMenuWindow.subviews.copy) {
         [view removeFromSuperview];
     }
     UIView *panel = [self buildPanel];
+    panel.center = [self menuCenter];
+    panel.alpha = 0.0;
+    panel.transform = CGAffineTransformMakeScale(hoMenuScale * 0.88, hoMenuScale * 0.88);
     [hoMenuWindow addSubview:panel];
     hoMenuWindow.hidden = NO;
+    hoIconVisible = NO;
+    [UIView animateWithDuration:0.36 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.15 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        panel.alpha = 1.0;
+        panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
+    } completion:nil];
 }
 
 + (void)hide {
+    hoIconVisible = NO;
+    if (!hoMenuWindow) {
+        return;
+    }
     hoMenuWindow.hidden = YES;
     for (UIView *view in hoMenuWindow.subviews.copy) {
         [view removeFromSuperview];
@@ -563,17 +719,14 @@ static void HOHookAlerts(void) {
 + (UIView *)buildPanel {
     UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:effect];
-    CGRect panelFrame = CGRectMake((UIScreen.mainScreen.bounds.size.width - 340) / 2, (UIScreen.mainScreen.bounds.size.height - 455) / 2, 340, 455);
-    panelFrame.origin.x += hoMenuOffset.x;
-    panelFrame.origin.y += hoMenuOffset.y;
-    panel.frame = panelFrame;
+    panel.frame = CGRectMake(0, 0, HO_PANEL_WIDTH, HO_PANEL_HEIGHT);
     panel.layer.cornerRadius = 22;
     panel.layer.borderWidth = 0.5;
     panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
     panel.clipsToBounds = YES;
     panel.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
 
-    UIView *accent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 340, 3)];
+    UIView *accent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, HO_PANEL_WIDTH, 3)];
     accent.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
     [panel.contentView addSubview:accent];
 
@@ -581,76 +734,168 @@ static void HOHookAlerts(void) {
     pan.cancelsTouchesInView = NO;
     pan.delaysTouchesBegan = NO;
     [panel addGestureRecognizer:pan];
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+    pinch.cancelsTouchesInView = NO;
+    [panel addGestureRecognizer:pinch];
 
-    [panel.contentView addSubview:[self labelWithText:@"HO CONTROL" frame:CGRectMake(18, 18, 220, 28) fontSize:20 bold:YES]];
-    [panel.contentView addSubview:[self labelWithText:@"OFF = bảo vệ   ON = bỏ chặn" frame:CGRectMake(18, 47, 250, 18) fontSize:12 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"MOD MENU BY ANONYMOUS" frame:CGRectMake(18, 15, 260, 26) fontSize:17 bold:YES]];
+    [panel.contentView addSubview:[self labelWithText:@"TẮT = chưa bảo vệ   BẬT = đang bảo vệ" frame:CGRectMake(18, 42, 290, 16) fontSize:11 bold:NO]];
 
-    UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(272, 18, 52, 28) action:@selector(close) target:self];
+    UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(282, 14, 44, 28) action:@selector(close) target:self];
     [panel.contentView addSubview:close];
 
-    BOOL anyUnblocked = NO;
+    BOOL anyProtected = NO;
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        if (HOUnblocked((HOToggle)index)) {
-            anyUnblocked = YES;
+        if (HOProtectionEnabled((HOToggle)index)) {
+            anyProtected = YES;
             break;
         }
     }
-    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(18, 75, 304, 28)];
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(18, 66, 304, 28)];
     pill.layer.cornerRadius = 14;
-    pill.backgroundColor = anyUnblocked ? [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:0.18] : [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:0.16];
+    pill.backgroundColor = anyProtected ? [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:0.16] : [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:0.18];
     [panel.contentView addSubview:pill];
-    UILabel *pillLabel = [self labelWithText:anyUnblocked ? @"TRẠNG THÁI: ĐANG BỎ CHẶN" : @"TRẠNG THÁI: ĐANG BẢO VỆ" frame:CGRectMake(12, 5, 280, 18) fontSize:12 bold:YES];
-    pillLabel.textColor = anyUnblocked ? [UIColor colorWithRed:1.0 green:0.72 blue:0.42 alpha:1] : [UIColor colorWithRed:0.45 green:0.9 blue:1.0 alpha:1];
+    UILabel *pillLabel = [self labelWithText:anyProtected ? @"TRẠNG THÁI: ĐANG BẢO VỆ" : @"TRẠNG THÁI: CHƯA BẢO VỆ" frame:CGRectMake(12, 5, 280, 18) fontSize:12 bold:YES];
+    pillLabel.textColor = anyProtected ? [UIColor colorWithRed:0.45 green:0.9 blue:1.0 alpha:1] : [UIColor colorWithRed:1.0 green:0.72 blue:0.42 alpha:1];
     [pill addSubview:pillLabel];
 
-    NSArray<NSString *> *titles = @[@"Bỏ chặn chụp màn hình", @"Bỏ chặn quay màn hình", @"Bỏ chặn logout/log", @"Bỏ chặn session/device JS", @"Bỏ chặn rời bài"];
+    [panel.contentView addSubview:[self labelWithText:@"BẢO VỆ" frame:CGRectMake(18, 102, 200, 16) fontSize:11 bold:YES]];
+
+    NSArray<NSString *> *titles = @[@"Chụp màn hình", @"Quay màn hình", @"Logout / log", @"Session / device JS", @"Rời bài"];
     for (NSInteger index = 0; index < titles.count; index++) {
-        CGFloat y = 114 + index * 49;
-        UIView *row = [[UIView alloc] initWithFrame:CGRectMake(12, y, 316, 44)];
+        CGFloat y = 124 + index * 48;
+        UIView *row = [[UIView alloc] initWithFrame:CGRectMake(12, y, 316, 43)];
         row.layer.cornerRadius = 12;
         row.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.055];
         [panel.contentView addSubview:row];
 
-        BOOL rowUnblocked = HOUnblocked((HOToggle)index);
-        UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 5, 220, 18) fontSize:14 bold:YES];
+        BOOL rowProtected = HOProtectionEnabled((HOToggle)index);
+        UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 4, 220, 18) fontSize:14 bold:YES];
         [row addSubview:title];
-        UILabel *detail = [self labelWithText:rowUnblocked ? @"Đang bỏ chặn" : @"Đang bảo vệ" frame:CGRectMake(14, 24, 220, 14) fontSize:11 bold:NO];
+        UILabel *detail = [self labelWithText:rowProtected ? @"Đang bảo vệ" : @"Chưa có bảo vệ" frame:CGRectMake(14, 23, 220, 14) fontSize:11 bold:NO];
         detail.textColor = [UIColor colorWithWhite:0.72 alpha:1];
         [row addSubview:detail];
 
-        HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(254, 7, 51, 31)];
+        HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(254, 6, 51, 31)];
         toggle.hoIndex = index;
-        toggle.on = rowUnblocked;
-        toggle.onTintColor = [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:1];
+        toggle.on = rowProtected;
+        toggle.onTintColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
         toggle.tintColor = [UIColor colorWithWhite:1.0 alpha:0.16];
         toggle.thumbTintColor = UIColor.whiteColor;
         [toggle addTarget:self action:@selector(change:) forControlEvents:UIControlEventValueChanged];
         [row addSubview:toggle];
     }
 
-    [panel.contentView addSubview:[self buttonWithTitle:@"Bỏ chặn tất cả" frame:CGRectMake(18, 372, 148, 40) action:@selector(allOn) target:self]];
-    [panel.contentView addSubview:[self buttonWithTitle:@"Bảo vệ tất cả" frame:CGRectMake(174, 372, 148, 40) action:@selector(allOff) target:self]];
-    [panel.contentView addSubview:[self labelWithText:@"Chỉ áp dụng trong phiên hiện tại" frame:CGRectMake(18, 424, 304, 16) fontSize:11 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"DASHBOARD / CÀI ĐẶT" frame:CGRectMake(18, 370, 220, 16) fontSize:11 bold:YES]];
+    [panel.contentView addSubview:[self buttonWithTitle:@"Thu thành icon" frame:CGRectMake(18, 392, 148, 40) action:@selector(minimize) target:self]];
+    [panel.contentView addSubview:[self buttonWithTitle:@"Reset zoom" frame:CGRectMake(174, 392, 148, 40) action:@selector(resetZoom) target:self]];
+    [panel.contentView addSubview:[self labelWithText:@"Kéo = di chuyển · Chụm = thu phóng" frame:CGRectMake(18, 442, 304, 16) fontSize:11 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"Chỉ áp dụng trong phiên hiện tại" frame:CGRectMake(18, 466, 304, 16) fontSize:11 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"v4 · Anonymous" frame:CGRectMake(18, 500, 304, 14) fontSize:10 bold:NO]];
+    panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
     return panel;
 }
 
 + (void)change:(HOSwitch *)sender {
-    HOApplyToggle((HOToggle)sender.hoIndex, sender.isOn);
+    HOApplyToggle((HOToggle)sender.hoIndex, !sender.isOn);
     [self show];
 }
 
 + (void)allOn {
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        HOApplyToggle((HOToggle)index, YES);
+        HOApplyToggle((HOToggle)index, NO);
     }
     [self show];
 }
 
 + (void)allOff {
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        HOApplyToggle((HOToggle)index, NO);
+        HOApplyToggle((HOToggle)index, YES);
     }
     [self show];
+}
+
++ (void)minimize {
+    if (!hoMenuWindow) {
+        return;
+    }
+    UIView *panel = nil;
+    for (UIView *view in hoMenuWindow.subviews.copy) {
+        if (view.tag != HO_ICON_TAG) {
+            panel = view;
+            break;
+        }
+    }
+    if (!panel) {
+        return;
+    }
+    UIButton *icon = [self floatingIcon];
+    CGPoint target = [self floatingIconCenter];
+    [UIView animateWithDuration:0.42 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.12 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+        panel.center = target;
+        panel.transform = CGAffineTransformMakeScale(0.12, 0.12);
+        panel.alpha = 0.0;
+        panel.layer.cornerRadius = HO_ICON_SIZE / 2;
+    } completion:^(BOOL finished) {
+        [panel removeFromSuperview];
+        icon.center = target;
+        icon.alpha = 0.0;
+        icon.transform = CGAffineTransformMakeScale(0.25, 0.25);
+        [hoMenuWindow addSubview:icon];
+        hoIconVisible = YES;
+        [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.62 initialSpringVelocity:0.2 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+            icon.alpha = 1.0;
+            icon.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }];
+}
+
++ (void)restore {
+    if (!hoMenuWindow) {
+        [self show];
+        return;
+    }
+    UIButton *icon = nil;
+    for (UIView *view in hoMenuWindow.subviews.copy) {
+        if (view.tag == HO_ICON_TAG && [view isKindOfClass:UIButton.class]) {
+            icon = (UIButton *)view;
+            break;
+        }
+    }
+    if (!icon) {
+        [self show];
+        return;
+    }
+    UIView *panel = [self buildPanel];
+    panel.center = icon.center;
+    panel.alpha = 0.0;
+    panel.transform = CGAffineTransformMakeScale(0.18, 0.18);
+    [icon removeFromSuperview];
+    [hoMenuWindow addSubview:panel];
+    hoIconVisible = NO;
+    CGPoint target = [self menuCenter];
+    [UIView animateWithDuration:0.55 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:0.16 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+        panel.center = target;
+        panel.alpha = 1.0;
+        panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
+    } completion:nil];
+}
+
++ (void)resetZoom {
+    hoMenuScale = 1.0;
+    hoPinchStartScale = 1.0;
+    if (!hoMenuWindow) {
+        return;
+    }
+    for (UIView *view in hoMenuWindow.subviews.copy) {
+        if (view.tag == HO_ICON_TAG) {
+            continue;
+        }
+        [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.1 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+            view.center = [self menuCenter];
+            view.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
 }
 
 + (void)close {
@@ -682,25 +927,6 @@ __attribute__((constructor)) static void HOEntry(void) {
         hoHookedMethods = [NSMutableSet set];
         hoPluginOriginals = [NSMutableDictionary dictionary];
         hoLifecycleOriginals = [NSMutableDictionary dictionary];
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            if (HOUnblocked(HOToggleLockWarning)) {
-                hoPendingLeaveWarning = YES;
-            }
-        }];
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            if (HOUnblocked(HOToggleLockWarning)) {
-                hoPendingLeaveWarning = YES;
-            }
-        }];
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
-            HOInstallGesture();
-            if (hoPendingLeaveWarning && HOUnblocked(HOToggleLockWarning)) {
-                hoPendingLeaveWarning = NO;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [HOMenu showLeaveWarning];
-                });
-            }
-        }];
         HOHookNotificationCenter();
         HOHookWebView();
         HOHookPlugins();
