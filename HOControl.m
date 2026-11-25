@@ -7,8 +7,10 @@
 
 #define HO_MENU_TAG 981372
 #define HO_ICON_TAG 981373
-#define HO_PANEL_WIDTH 340.0
-#define HO_PANEL_HEIGHT 540.0
+#define HO_ALPHA_LABEL_TAG 981374
+#define HO_SIZE_LABEL_TAG 981375
+#define HO_PANEL_WIDTH 380.0
+#define HO_PANEL_HEIGHT 660.0
 #define HO_ICON_SIZE 56.0
 
 static NSString *const HOIconImageURL = @"https://imgs.search.brave.com/Gll420MeLwA4SVJxJEp_QrJQbBsytXon6-FLTXpSt08/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9pbWFn/ZXMucGV4ZWxzLmNv/bS9waG90b3MvMzg4/MDA0OS9wZXhlbHMt/cGhvdG8tMzg4MDA0/OS5qcGVnP2NzPXRp/bnlzcmdiJmRwcj0x/Jnc9NTAw";
@@ -33,6 +35,19 @@ static NSString *const HOIconImageURL = @"https://imgs.search.brave.com/Gll420Me
 + (void)minimize;
 + (void)restore;
 + (void)resetZoom;
++ (UIColor *)textColor;
++ (UIView *)menuPanel;
++ (void)showFunctions;
++ (void)showSettings;
++ (void)toggleStreamMode;
++ (void)alphaChanged:(UISlider *)slider;
++ (void)sizeChanged:(UISlider *)slider;
++ (void)languageChanged:(UISegmentedControl *)control;
++ (void)selectColor:(UIButton *)button;
++ (void)useDarkTheme;
++ (void)useLightTheme;
++ (void)closePanel;
++ (void)hidePanelOnly;
 + (UIWindow *)appWindow;
 + (CGPoint)baseMenuCenter;
 + (CGPoint)menuCenter;
@@ -77,33 +92,56 @@ static CGFloat hoPinchStartScale = 1.0;
 static CGPoint hoIconCenter = {0.0, 0.0};
 static CGPoint hoIconPanStart = {0.0, 0.0};
 static BOOL hoIconVisible = NO;
+static BOOL hoStreamMode = NO;
+static CGFloat hoMenuAlpha = 1.0;
+static NSInteger hoLanguage = 0;
+static NSInteger hoTheme = 0;
+static NSInteger hoTab = 0;
+static NSInteger hoAccentColorIndex = 0;
 static NSTimeInterval hoLastTapTime = 0;
 
 static BOOL HOUnblocked(HOToggle toggle) {
     return hoStates[toggle];
 }
 
-static BOOL HOProtectionEnabled(HOToggle toggle) {
-    return !hoStates[toggle];
+static NSString *HOLocalized(NSString *vietnamese, NSString *english, NSString *chinese) {
+    if (hoLanguage == 1) {
+        return english;
+    }
+    if (hoLanguage == 2) {
+        return chinese;
+    }
+    return vietnamese;
 }
 
-static NSString *HOProtectionDetail(HOToggle toggle, BOOL enabled) {
-    if (!enabled) {
-        return @"Tắt: MOD không can thiệp";
+static UIColor *HOAccentColor(void) {
+    NSArray<UIColor *> *colors = @[
+        [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1],
+        [UIColor colorWithRed:1.0 green:0.32 blue:0.36 alpha:1],
+        [UIColor colorWithRed:0.66 green:0.42 blue:0.98 alpha:1],
+        [UIColor colorWithRed:0.30 green:0.86 blue:0.52 alpha:1],
+        [UIColor colorWithRed:1.0 green:0.70 blue:0.22 alpha:1]
+    ];
+    return colors[(NSUInteger)hoAccentColorIndex % colors.count];
+}
+
+static NSString *HOFeatureDetail(HOToggle toggle, BOOL on) {
+    if (!on) {
+        return HOLocalized(@"Tắt: giữ bảo vệ của app", @"Off: keep app protection", @"关：保留应用防护");
     }
     switch (toggle) {
         case HOToggleScreenshot:
-            return @"Bật: chặn app chụp màn hình";
+            return HOLocalized(@"Bật: chụp thường, không đen", @"On: screenshots work normally", @"开：正常截图，不黑屏");
         case HOToggleRecord:
-            return @"Bật: chặn app quay màn hình";
+            return HOLocalized(@"Bật: quay màn hình bình thường", @"On: screen recording works", @"开：可正常录屏");
         case HOToggleLogout:
-            return @"Bật: chặn app logout / ghi log";
+            return HOLocalized(@"Bật: logout / log chạy lại", @"On: logout / logging works", @"开：允许退出与记录");
         case HOToggleSessionJS:
-            return @"Bật: chặn app đẩy JS session/device";
+            return HOLocalized(@"Bật: JS session/device chạy lại", @"On: session/device JS works", @"开：允许会话与设备 JS");
         case HOToggleLockWarning:
-            return @"Bật: chặn cờ rời bài";
+            return HOLocalized(@"Bật: không gắn cờ rời bài", @"On: no leave-page flag", @"开：不标记离开页面");
         default:
-            return @"Bật: MOD đang can thiệp";
+            return HOLocalized(@"Bật: MOD đang mở", @"On: MOD is allowing this", @"开：MOD 正在放行");
     }
 }
 
@@ -607,7 +645,7 @@ static void HOHookAlerts(void) {
         hoPinchStartScale = hoMenuScale;
     }
     CGFloat scale = hoPinchStartScale * gesture.scale;
-    hoMenuScale = MIN(MAX(scale, 0.55), 1.7);
+    hoMenuScale = MIN(MAX(scale, 0.10), 1.0);
     panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         hoPinchStartScale = hoMenuScale;
@@ -708,6 +746,7 @@ static void HOHookAlerts(void) {
     panel.transform = CGAffineTransformMakeScale(hoMenuScale * 0.88, hoMenuScale * 0.88);
     [hoMenuWindow addSubview:panel];
     hoMenuWindow.hidden = NO;
+    hoMenuWindow.alpha = hoMenuAlpha;
     hoIconVisible = NO;
     [UIView animateWithDuration:0.36 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.15 options:UIViewAnimationOptionAllowUserInteraction animations:^{
         panel.alpha = 1.0;
@@ -726,11 +765,15 @@ static void HOHookAlerts(void) {
     }
 }
 
++ (UIColor *)textColor {
+    return hoTheme == 0 ? UIColor.whiteColor : [UIColor colorWithWhite:0.08 alpha:1.0];
+}
+
 + (UILabel *)labelWithText:(NSString *)text frame:(CGRect)frame fontSize:(CGFloat)size bold:(BOOL)bold {
     UILabel *label = [[UILabel alloc] initWithFrame:frame];
     label.text = text;
     label.font = bold ? [UIFont boldSystemFontOfSize:size] : [UIFont systemFontOfSize:size];
-    label.textColor = UIColor.whiteColor;
+    label.textColor = [self textColor];
     label.backgroundColor = UIColor.clearColor;
     label.numberOfLines = 2;
     return label;
@@ -740,26 +783,28 @@ static void HOHookAlerts(void) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.frame = frame;
     [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.14];
+    [button setTitleColor:[self textColor] forState:UIControlStateNormal];
+    button.backgroundColor = hoTheme == 0 ? [UIColor colorWithWhite:1.0 alpha:0.14] : [UIColor colorWithWhite:0.0 alpha:0.09];
     button.layer.cornerRadius = 10;
     [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
 
 + (UIView *)buildPanel {
-    UIBlurEffect *effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+    UIColor *accent = HOAccentColor();
+    UIColor *rowColor = hoTheme == 0 ? [UIColor colorWithWhite:1.0 alpha:0.055] : [UIColor colorWithWhite:0.0 alpha:0.05];
+    UIBlurEffect *effect = [UIBlurEffect effectWithStyle:hoTheme == 0 ? UIBlurEffectStyleDark : UIBlurEffectStyleLight];
     UIVisualEffectView *panel = [[UIVisualEffectView alloc] initWithEffect:effect];
     panel.frame = CGRectMake(0, 0, HO_PANEL_WIDTH, HO_PANEL_HEIGHT);
     panel.layer.cornerRadius = 22;
     panel.layer.borderWidth = 0.5;
-    panel.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.16].CGColor;
+    panel.layer.borderColor = hoTheme == 0 ? [UIColor colorWithWhite:1.0 alpha:0.16].CGColor : [UIColor colorWithWhite:0.0 alpha:0.12].CGColor;
     panel.clipsToBounds = YES;
-    panel.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
+    panel.contentView.backgroundColor = hoTheme == 0 ? [UIColor colorWithWhite:0 alpha:0.28] : [UIColor colorWithWhite:1.0 alpha:0.35];
 
-    UIView *accent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, HO_PANEL_WIDTH, 3)];
-    accent.backgroundColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
-    [panel.contentView addSubview:accent];
+    UIView *accentBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, HO_PANEL_WIDTH, 3)];
+    accentBar.backgroundColor = accent;
+    [panel.contentView addSubview:accentBar];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
     pan.cancelsTouchesInView = NO;
@@ -769,81 +814,264 @@ static void HOHookAlerts(void) {
     pinch.cancelsTouchesInView = NO;
     [panel addGestureRecognizer:pinch];
 
-    [panel.contentView addSubview:[self labelWithText:@"MOD MENU BY ANONYMOUS" frame:CGRectMake(18, 15, 260, 26) fontSize:17 bold:YES]];
-    [panel.contentView addSubview:[self labelWithText:@"BẬT = MOD chặn   TẮT = app chạy bình thường" frame:CGRectMake(18, 42, 290, 16) fontSize:11 bold:NO]];
+    UIButton *skull = [self buttonWithTitle:@"☠" frame:CGRectMake(8, 86, 40, 40) action:@selector(showFunctions) target:self];
+    skull.titleLabel.font = [UIFont systemFontOfSize:22];
+    skull.backgroundColor = hoTab == 0 ? [accent colorWithAlphaComponent:0.30] : [UIColor colorWithWhite:0.5 alpha:0.12];
+    [panel.contentView addSubview:skull];
+    UIButton *gear = [self buttonWithTitle:@"⚙" frame:CGRectMake(8, 136, 40, 40) action:@selector(showSettings) target:self];
+    gear.titleLabel.font = [UIFont systemFontOfSize:22];
+    gear.backgroundColor = hoTab == 1 ? [accent colorWithAlphaComponent:0.30] : [UIColor colorWithWhite:0.5 alpha:0.12];
+    [panel.contentView addSubview:gear];
+    [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Chức năng", @"Functions", @"功能") frame:CGRectMake(4, 128, 48, 12) fontSize:9 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Cài đặt", @"Settings", @"设置") frame:CGRectMake(4, 178, 48, 12) fontSize:9 bold:NO]];
 
-    UIButton *close = [self buttonWithTitle:@"Đóng" frame:CGRectMake(282, 14, 44, 28) action:@selector(close) target:self];
-    [panel.contentView addSubview:close];
+    CGFloat x = 66.0;
+    CGFloat w = 270.0;
+    [panel.contentView addSubview:[self labelWithText:@"MOD MENU BY ANONYMOUS" frame:CGRectMake(x, 14, 210, 26) fontSize:16 bold:YES]];
+    [panel.contentView addSubview:[self labelWithText:HOLocalized(@"BẬT = chụp thường, không đen", @"ON = normal capture, no black", @"开：正常截图，不黑屏") frame:CGRectMake(x, 42, 220, 16) fontSize:11 bold:NO]];
 
-    BOOL anyProtected = NO;
+    UIButton *closeButton = [self buttonWithTitle:@"X" frame:CGRectMake(282, 14, 28, 28) action:@selector(closePanel) target:self];
+    [panel.contentView addSubview:closeButton];
+    UIButton *exitButton = [self buttonWithTitle:HOLocalized(@"Thoát", @"Exit", @"退出") frame:CGRectMake(316, 14, 52, 28) action:@selector(close) target:self];
+    [panel.contentView addSubview:exitButton];
+
+    UIButton *moon = [self buttonWithTitle:@"☾" frame:CGRectMake(344, 100, 28, 28) action:@selector(useDarkTheme) target:self];
+    moon.titleLabel.font = [UIFont systemFontOfSize:20];
+    moon.backgroundColor = hoTheme == 0 ? [accent colorWithAlphaComponent:0.28] : [UIColor colorWithWhite:0.5 alpha:0.12];
+    [panel.contentView addSubview:moon];
+    UIButton *sun = [self buttonWithTitle:@"☀" frame:CGRectMake(344, 138, 28, 28) action:@selector(useLightTheme) target:self];
+    sun.titleLabel.font = [UIFont systemFontOfSize:18];
+    sun.backgroundColor = hoTheme == 1 ? [accent colorWithAlphaComponent:0.28] : [UIColor colorWithWhite:0.5 alpha:0.12];
+    [panel.contentView addSubview:sun];
+
+    BOOL anyOn = NO;
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        if (HOProtectionEnabled((HOToggle)index)) {
-            anyProtected = YES;
+        if (HOUnblocked((HOToggle)index)) {
+            anyOn = YES;
             break;
         }
     }
-    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(18, 66, 304, 28)];
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(x, 66, w, 28)];
     pill.layer.cornerRadius = 14;
-    pill.backgroundColor = anyProtected ? [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:0.16] : [UIColor colorWithRed:0.95 green:0.55 blue:0.25 alpha:0.18];
+    pill.backgroundColor = anyOn ? [accent colorWithAlphaComponent:0.18] : [UIColor colorWithWhite:0.5 alpha:0.13];
     [panel.contentView addSubview:pill];
-    UILabel *pillLabel = [self labelWithText:anyProtected ? @"TRẠNG THÁI: ĐANG BẢO VỆ" : @"TRẠNG THÁI: CHƯA BẢO VỆ" frame:CGRectMake(12, 5, 280, 18) fontSize:12 bold:YES];
-    pillLabel.textColor = anyProtected ? [UIColor colorWithRed:0.45 green:0.9 blue:1.0 alpha:1] : [UIColor colorWithRed:1.0 green:0.72 blue:0.42 alpha:1];
+    UILabel *pillLabel = [self labelWithText:anyOn ? HOLocalized(@"TRẠNG THÁI: ĐANG MỞ CHỨC NĂNG", @"STATUS: FEATURES ON", @"状态：功能开启") : HOLocalized(@"TRẠNG THÁI: GIỮ BẢO VỆ", @"STATUS: PROTECTED", @"状态：保持防护") frame:CGRectMake(12, 5, 250, 18) fontSize:12 bold:YES];
+    pillLabel.textColor = anyOn ? accent : [self textColor];
     [pill addSubview:pillLabel];
 
-    [panel.contentView addSubview:[self labelWithText:@"BẢO VỆ" frame:CGRectMake(18, 102, 200, 16) fontSize:11 bold:YES]];
+    if (hoTab == 0) {
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"CHỨC NĂNG", @"FEATURES", @"功能") frame:CGRectMake(x, 106, 200, 16) fontSize:11 bold:YES]];
+        NSArray<NSString *> *titles = @[
+            HOLocalized(@"Chụp màn hình", @"Screenshot", @"截图"),
+            HOLocalized(@"Quay màn hình", @"Screen record", @"录屏"),
+            HOLocalized(@"Logout / log", @"Logout / log", @"退出 / 日志"),
+            HOLocalized(@"Session / device JS", @"Session / device JS", @"会话 / 设备 JS"),
+            HOLocalized(@"Rời bài", @"Leave page", @"离开页面")
+        ];
+        for (NSInteger index = 0; index < titles.count; index++) {
+            CGFloat y = 128 + index * 48;
+            UIView *row = [[UIView alloc] initWithFrame:CGRectMake(x, y, w, 43)];
+            row.layer.cornerRadius = 12;
+            row.backgroundColor = rowColor;
+            [panel.contentView addSubview:row];
 
-    NSArray<NSString *> *titles = @[@"Chụp màn hình", @"Quay màn hình", @"Logout / log", @"Session / device JS", @"Rời bài"];
-    for (NSInteger index = 0; index < titles.count; index++) {
-        CGFloat y = 124 + index * 48;
-        UIView *row = [[UIView alloc] initWithFrame:CGRectMake(12, y, 316, 43)];
-        row.layer.cornerRadius = 12;
-        row.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.055];
-        [panel.contentView addSubview:row];
+            BOOL rowOn = HOUnblocked((HOToggle)index);
+            UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 4, 190, 18) fontSize:13 bold:YES];
+            [row addSubview:title];
+            UILabel *detail = [self labelWithText:HOFeatureDetail((HOToggle)index, rowOn) frame:CGRectMake(14, 23, 190, 14) fontSize:10 bold:NO];
+            detail.textColor = [self textColor];
+            [row addSubview:detail];
 
-        BOOL rowProtected = HOProtectionEnabled((HOToggle)index);
-        UILabel *title = [self labelWithText:titles[index] frame:CGRectMake(14, 4, 220, 18) fontSize:14 bold:YES];
-        [row addSubview:title];
-        UILabel *detail = [self labelWithText:HOProtectionDetail((HOToggle)index, rowProtected) frame:CGRectMake(14, 23, 220, 14) fontSize:11 bold:NO];
-        detail.textColor = [UIColor colorWithWhite:0.72 alpha:1];
-        [row addSubview:detail];
+            HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(212, 6, 51, 31)];
+            toggle.hoIndex = index;
+            toggle.on = rowOn;
+            toggle.onTintColor = accent;
+            toggle.tintColor = [UIColor colorWithWhite:0.5 alpha:0.25];
+            toggle.thumbTintColor = UIColor.whiteColor;
+            [toggle addTarget:self action:@selector(change:) forControlEvents:UIControlEventValueChanged];
+            [row addSubview:toggle];
+        }
+        [panel.contentView addSubview:[self buttonWithTitle:HOLocalized(@"Bật tất cả", @"All on", @"全开") frame:CGRectMake(x, 378, 130, 38) action:@selector(allOn) target:self]];
+        [panel.contentView addSubview:[self buttonWithTitle:HOLocalized(@"Tắt tất cả", @"All off", @"全关") frame:CGRectMake(x + 140, 378, 130, 38) action:@selector(allOff) target:self]];
+        [panel.contentView addSubview:[self buttonWithTitle:HOLocalized(@"Thu thành icon", @"Minimize", @"缩小为图标") frame:CGRectMake(x, 424, 130, 38) action:@selector(minimize) target:self]];
+        [panel.contentView addSubview:[self buttonWithTitle:HOLocalized(@"Reset zoom", @"Reset zoom", @"重置缩放") frame:CGRectMake(x + 140, 424, 130, 38) action:@selector(resetZoom) target:self]];
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Kéo = di chuyển · Chụm = thu phóng", @"Drag = move · Pinch = zoom", @"拖动=移动 · 捏合=缩放") frame:CGRectMake(x, 472, w, 16) fontSize:10 bold:NO]];
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Chỉ áp dụng trong phiên hiện tại", @"Session only", @"仅本次会话") frame:CGRectMake(x, 494, w, 16) fontSize:10 bold:NO]];
+    } else {
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"CÀI ĐẶT", @"SETTINGS", @"设置") frame:CGRectMake(x, 106, 200, 16) fontSize:11 bold:YES]];
 
-        HOSwitch *toggle = [[HOSwitch alloc] initWithFrame:CGRectMake(254, 6, 51, 31)];
-        toggle.hoIndex = index;
-        toggle.on = rowProtected;
-        toggle.onTintColor = [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1];
-        toggle.tintColor = [UIColor colorWithWhite:1.0 alpha:0.16];
-        toggle.thumbTintColor = UIColor.whiteColor;
-        [toggle addTarget:self action:@selector(change:) forControlEvents:UIControlEventValueChanged];
-        [row addSubview:toggle];
+        UIView *streamRow = [[UIView alloc] initWithFrame:CGRectMake(x, 128, w, 44)];
+        streamRow.layer.cornerRadius = 12;
+        streamRow.backgroundColor = rowColor;
+        [panel.contentView addSubview:streamRow];
+        [streamRow addSubview:[self labelWithText:HOLocalized(@"Stream mode", @"Stream mode", @"直播模式") frame:CGRectMake(12, 4, 170, 18) fontSize:13 bold:YES]];
+        [streamRow addSubview:[self labelWithText:HOLocalized(@"Chụp màn hình thì ẩn menu", @"Hide menu on screenshot", @"截图时隐藏菜单") frame:CGRectMake(12, 23, 184, 14) fontSize:10 bold:NO]];
+        UIButton *stream = [UIButton buttonWithType:UIButtonTypeCustom];
+        stream.frame = CGRectMake(216, 4, 36, 36);
+        stream.layer.cornerRadius = 10;
+        stream.backgroundColor = hoStreamMode ? [UIColor colorWithRed:1.0 green:0.24 blue:0.28 alpha:1] : [UIColor colorWithWhite:0.5 alpha:0.25];
+        [stream setTitle:hoStreamMode ? @"ON" : @"OFF" forState:UIControlStateNormal];
+        [stream setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        stream.titleLabel.font = [UIFont boldSystemFontOfSize:10];
+        [stream addTarget:self action:@selector(toggleStreamMode) forControlEvents:UIControlEventTouchUpInside];
+        [streamRow addSubview:stream];
+
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Độ trong suốt menu", @"Menu opacity", @"菜单透明度") frame:CGRectMake(x, 184, 180, 16) fontSize:11 bold:YES]];
+        UILabel *alphaValue = [self labelWithText:[NSString stringWithFormat:@"%.2f", hoMenuAlpha] frame:CGRectMake(x + 226, 184, 44, 16) fontSize:11 bold:YES];
+        alphaValue.tag = HO_ALPHA_LABEL_TAG;
+        [panel.contentView addSubview:alphaValue];
+        UISlider *alphaSlider = [[UISlider alloc] initWithFrame:CGRectMake(x, 204, w, 24)];
+        alphaSlider.minimumValue = 0.0;
+        alphaSlider.maximumValue = 1.0;
+        alphaSlider.value = hoMenuAlpha;
+        alphaSlider.tintColor = accent;
+        [alphaSlider addTarget:self action:@selector(alphaChanged:) forControlEvents:UIControlEventValueChanged];
+        [panel.contentView addSubview:alphaSlider];
+
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Kích cỡ menu", @"Menu size", @"菜单尺寸") frame:CGRectMake(x, 240, 180, 16) fontSize:11 bold:YES]];
+        UILabel *sizeValue = [self labelWithText:[NSString stringWithFormat:@"%.2f", hoMenuScale] frame:CGRectMake(x + 226, 240, 44, 16) fontSize:11 bold:YES];
+        sizeValue.tag = HO_SIZE_LABEL_TAG;
+        [panel.contentView addSubview:sizeValue];
+        UISlider *sizeSlider = [[UISlider alloc] initWithFrame:CGRectMake(x, 260, w, 24)];
+        sizeSlider.minimumValue = 0.10;
+        sizeSlider.maximumValue = 1.0;
+        sizeSlider.value = hoMenuScale;
+        sizeSlider.tintColor = accent;
+        [sizeSlider addTarget:self action:@selector(sizeChanged:) forControlEvents:UIControlEventValueChanged];
+        [panel.contentView addSubview:sizeSlider];
+
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Ngôn ngữ", @"Language", @"语言") frame:CGRectMake(x, 296, 180, 16) fontSize:11 bold:YES]];
+        UISegmentedControl *language = [[UISegmentedControl alloc] initWithItems:@[@"VI", @"EN", @"ZH"]];
+        language.frame = CGRectMake(x, 316, w, 30);
+        language.selectedSegmentIndex = hoLanguage;
+        language.tintColor = accent;
+        if (@available(iOS 13.0, *)) {
+            language.selectedSegmentTintColor = accent;
+        }
+        [language addTarget:self action:@selector(languageChanged:) forControlEvents:UIControlEventValueChanged];
+        [panel.contentView addSubview:language];
+
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"Màu menu", @"Menu color", @"菜单颜色") frame:CGRectMake(x, 358, 180, 16) fontSize:11 bold:YES]];
+        NSArray<UIColor *> *swatches = @[
+            [UIColor colorWithRed:0.18 green:0.78 blue:0.95 alpha:1],
+            [UIColor colorWithRed:1.0 green:0.32 blue:0.36 alpha:1],
+            [UIColor colorWithRed:0.66 green:0.42 blue:0.98 alpha:1],
+            [UIColor colorWithRed:0.30 green:0.86 blue:0.52 alpha:1],
+            [UIColor colorWithRed:1.0 green:0.70 blue:0.22 alpha:1]
+        ];
+        for (NSInteger index = 0; index < swatches.count; index++) {
+            UIButton *swatch = [UIButton buttonWithType:UIButtonTypeCustom];
+            swatch.frame = CGRectMake(x + index * 46, 380, 34, 34);
+            swatch.tag = index;
+            swatch.layer.cornerRadius = 17;
+            swatch.backgroundColor = swatches[index];
+            swatch.layer.borderWidth = index == hoAccentColorIndex ? 3.0 : 0.5;
+            swatch.layer.borderColor = index == hoAccentColorIndex ? [self textColor].CGColor : [UIColor clearColor].CGColor;
+            [swatch addTarget:self action:@selector(selectColor:) forControlEvents:UIControlEventTouchUpInside];
+            [panel.contentView addSubview:swatch];
+        }
+
+        [panel.contentView addSubview:[self buttonWithTitle:HOLocalized(@"Thu thành icon", @"Minimize", @"缩小为图标") frame:CGRectMake(x, 430, w, 38) action:@selector(minimize) target:self]];
+        [panel.contentView addSubview:[self labelWithText:HOLocalized(@"☾ Dark   ☀ Light", @"☾ Dark   ☀ Light", @"☾ 深色   ☀ 浅色") frame:CGRectMake(x, 480, w, 16) fontSize:10 bold:NO]];
     }
 
-    [panel.contentView addSubview:[self labelWithText:@"DASHBOARD / CÀI ĐẶT" frame:CGRectMake(18, 370, 220, 16) fontSize:11 bold:YES]];
-    [panel.contentView addSubview:[self buttonWithTitle:@"Thu thành icon" frame:CGRectMake(18, 392, 148, 40) action:@selector(minimize) target:self]];
-    [panel.contentView addSubview:[self buttonWithTitle:@"Reset zoom" frame:CGRectMake(174, 392, 148, 40) action:@selector(resetZoom) target:self]];
-    [panel.contentView addSubview:[self labelWithText:@"Kéo = di chuyển · Chụm = thu phóng" frame:CGRectMake(18, 442, 304, 16) fontSize:11 bold:NO]];
-    [panel.contentView addSubview:[self labelWithText:@"Bật = MOD can thiệp · Tắt = app chạy gốc · chỉ trong phiên này" frame:CGRectMake(18, 466, 304, 16) fontSize:10 bold:NO]];
-    [panel.contentView addSubview:[self labelWithText:@"v5 · Anonymous" frame:CGRectMake(18, 500, 304, 14) fontSize:10 bold:NO]];
+    [panel.contentView addSubview:[self labelWithText:@"v6 · Anonymous" frame:CGRectMake(x, 624, w, 14) fontSize:10 bold:NO]];
     panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
     return panel;
 }
 
 + (void)change:(HOSwitch *)sender {
-    HOApplyToggle((HOToggle)sender.hoIndex, !sender.isOn);
+    HOApplyToggle((HOToggle)sender.hoIndex, sender.isOn);
     [self show];
 }
 
 + (void)allOn {
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        HOApplyToggle((HOToggle)index, NO);
+        HOApplyToggle((HOToggle)index, YES);
     }
     [self show];
 }
 
 + (void)allOff {
     for (NSInteger index = 0; index < HOToggleCount; index++) {
-        HOApplyToggle((HOToggle)index, YES);
+        HOApplyToggle((HOToggle)index, NO);
     }
     [self show];
+}
+
++ (UIView *)menuPanel {
+    for (UIView *view in hoMenuWindow.subviews.copy) {
+        if (view.tag != HO_ICON_TAG) {
+            return view;
+        }
+    }
+    return nil;
+}
+
++ (void)showFunctions {
+    hoTab = 0;
+    [self show];
+}
+
++ (void)showSettings {
+    hoTab = 1;
+    [self show];
+}
+
++ (void)toggleStreamMode {
+    hoStreamMode = !hoStreamMode;
+    [self show];
+}
+
++ (void)alphaChanged:(UISlider *)slider {
+    hoMenuAlpha = slider.value;
+    hoMenuWindow.alpha = hoMenuAlpha;
+    UILabel *value = (UILabel *)[hoMenuWindow viewWithTag:HO_ALPHA_LABEL_TAG];
+    value.text = [NSString stringWithFormat:@"%.2f", hoMenuAlpha];
+}
+
++ (void)sizeChanged:(UISlider *)slider {
+    hoMenuScale = slider.value;
+    hoPinchStartScale = hoMenuScale;
+    UIView *panel = [self menuPanel];
+    panel.transform = CGAffineTransformMakeScale(hoMenuScale, hoMenuScale);
+    UILabel *value = (UILabel *)[hoMenuWindow viewWithTag:HO_SIZE_LABEL_TAG];
+    value.text = [NSString stringWithFormat:@"%.2f", hoMenuScale];
+}
+
++ (void)languageChanged:(UISegmentedControl *)control {
+    hoLanguage = control.selectedSegmentIndex;
+    [self show];
+}
+
++ (void)selectColor:(UIButton *)button {
+    hoAccentColorIndex = button.tag;
+    [self show];
+}
+
++ (void)useDarkTheme {
+    hoTheme = 0;
+    [self show];
+}
+
++ (void)useLightTheme {
+    hoTheme = 1;
+    [self show];
+}
+
++ (void)closePanel {
+    [self minimize];
+}
+
++ (void)hidePanelOnly {
+    if (!hoMenuWindow) {
+        return;
+    }
+    UIView *panel = [self menuPanel];
+    [panel removeFromSuperview];
+    if (!hoIconVisible) {
+        hoMenuWindow.hidden = YES;
+    }
 }
 
 + (void)minimize {
@@ -958,6 +1186,11 @@ __attribute__((constructor)) static void HOEntry(void) {
         hoHookedMethods = [NSMutableSet set];
         hoPluginOriginals = [NSMutableDictionary dictionary];
         hoLifecycleOriginals = [NSMutableDictionary dictionary];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationUserDidTakeScreenshotNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            if (hoStreamMode) {
+                [HOMenu hidePanelOnly];
+            }
+        }];
         HOHookNotificationCenter();
         HOHookWebView();
         HOHookPlugins();
