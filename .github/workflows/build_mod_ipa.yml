@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-15-intel
     env:
       IPA_NAME: Học_Cùng_AI_-_AISAVA_-_EDUKID_v2.3.5_Decrypted.ipa
       HAS_SIGN: ${{ secrets.CERT_P12 != '' }}
